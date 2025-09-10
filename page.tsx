@@ -5,6 +5,12 @@ import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { STLLoader } from "three/examples/jsm/loaders/STLLoader.js";
 
+type Annotation = {
+  id: number;
+  text: string;
+  position: { x: number; y: number };
+};
+
 type ViewerState = {
   loading: boolean;
   error: string | null;
@@ -20,9 +26,14 @@ export default function VisualizadorSTL() {
   const controlsRef = useRef<InstanceType<typeof OrbitControls> | null>(null);
   const meshRef = useRef<THREE.Mesh | null>(null);
 
-  const [state, setState] = useState<ViewerState>({ loading: false, error: null });
+  // Raycaster e seleção
+  const raycaster = useRef(new THREE.Raycaster());
+  const mouse = useRef(new THREE.Vector2());
+  const hoveredRef = useRef<THREE.Mesh | null>(null);
 
-  // --- helpers ---------------------------------------------------------------
+  const [state, setState] = useState<ViewerState>({ loading: false, error: null });
+  const [annotations, setAnnotations] = useState<Annotation[]>([]);
+  const [activeAnnotation, setActiveAnnotation] = useState<Annotation | null>(null);
 
   const setupThree = () => {
     const container = containerRef.current!;
@@ -35,7 +46,7 @@ export default function VisualizadorSTL() {
     renderer.outputColorSpace = THREE.SRGBColorSpace;
 
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color("#f3f4f6"); // bg- gray-100
+    scene.background = new THREE.Color("#E8FAF6");
 
     const camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 5000);
     camera.position.set(150, 120, 150);
@@ -43,19 +54,19 @@ export default function VisualizadorSTL() {
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
 
-    // Luzes suaves
+    // Luzes
     const ambient = new THREE.AmbientLight(0xffffff, 0.7);
     const dir = new THREE.DirectionalLight(0xffffff, 0.8);
     dir.position.set(1, 1, 1);
 
-    // Um grid discreto para orientação
-    const grid = new THREE.GridHelper(400, 20, 0xcccccc, 0xeeeeee);
+    // Grid
+    const grid = new THREE.GridHelper(400, 20, 0xffa500, 0xcccccc);
     (grid.material as THREE.Material).opacity = 0.4;
     (grid.material as THREE.Material).transparent = true;
 
     scene.add(ambient, dir, grid);
 
-    container.innerHTML = ""; // limpa antes de anexar
+    container.innerHTML = "";
     container.appendChild(renderer.domElement);
 
     rendererRef.current = renderer;
@@ -91,6 +102,51 @@ export default function VisualizadorSTL() {
     camera.updateProjectionMatrix();
   };
 
+  // Hover (muda cor)
+  const onMouseMove = (event: MouseEvent) => {
+    const renderer = rendererRef.current;
+    const scene = sceneRef.current;
+    const camera = cameraRef.current;
+    if (!renderer || !scene || !camera) return;
+
+    const rect = renderer.domElement.getBoundingClientRect();
+    mouse.current.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+    mouse.current.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+
+    raycaster.current.setFromCamera(mouse.current, camera);
+    const intersects = raycaster.current.intersectObjects(scene.children, true);
+
+    if (hoveredRef.current) {
+      (hoveredRef.current.material as THREE.MeshStandardMaterial).color.set("#cccccc");
+      hoveredRef.current = null;
+    }
+
+    if (intersects.length > 0) {
+      const first = intersects[0].object as THREE.Mesh;
+      if (first && first.isMesh) {
+        hoveredRef.current = first;
+        (first.material as THREE.MeshStandardMaterial).color.set("#ff6666");
+      }
+    }
+  };
+
+  // Clique abre anotação
+  const onClick = (event: MouseEvent) => {
+    if (!hoveredRef.current || !rendererRef.current) return;
+
+    const rect = rendererRef.current.domElement.getBoundingClientRect();
+    const annotation: Annotation = {
+      id: Date.now(),
+      text: "",
+      position: {
+        x: event.clientX - rect.left,
+        y: event.clientY - rect.top,
+      },
+    };
+
+    setActiveAnnotation(annotation);
+  };
+
   const clearCurrentMesh = () => {
     const scene = sceneRef.current;
     if (scene && meshRef.current) {
@@ -110,12 +166,11 @@ export default function VisualizadorSTL() {
     box.getSize(size);
     box.getCenter(center);
 
-    // centraliza
     controls.target.copy(center);
     const maxDim = Math.max(size.x, size.y, size.z);
     const fov = camera.fov * (Math.PI / 180);
-    let cameraZ = Math.abs((maxDim / 2) / Math.tan(fov / 2));
-    cameraZ *= 1.5; // margem
+    let cameraZ = Math.abs(maxDim / 2 / Math.tan(fov / 2));
+    cameraZ *= 1.0;
     camera.position.set(center.x + cameraZ, center.y + cameraZ * 0.8, center.z + cameraZ);
     camera.near = maxDim / 100;
     camera.far = maxDim * 100;
@@ -128,20 +183,13 @@ export default function VisualizadorSTL() {
     try {
       const loader = new STLLoader();
       const geometry: THREE.BufferGeometry = await new Promise((resolve, reject) => {
-        loader.load(
-          url,
-          (geom: THREE.BufferGeometry) => resolve(geom),
-          undefined,
-          (err: unknown) => reject(err)
-        );
+        loader.load(url, (geom: THREE.BufferGeometry) => resolve(geom), undefined, reject);
       });
 
-      // limpa mesh anterior
       clearCurrentMesh();
 
-      // material elegante
       const material = new THREE.MeshStandardMaterial({
-        color: "#B92C2C", // vermelho suave
+        color: "#cccccc",
         roughness: 0.45,
         metalness: 0.05,
       });
@@ -150,40 +198,28 @@ export default function VisualizadorSTL() {
       mesh.castShadow = true;
       mesh.receiveShadow = true;
 
-      // normaliza/centraliza a peça
       geometry.computeBoundingBox();
       const box = geometry.boundingBox!;
       const size = new THREE.Vector3();
       box.getSize(size);
       const maxDim = Math.max(size.x, size.y, size.z);
-      const scale = 200 / maxDim; // ajusta para caber no grid
+      const scale = 200 / maxDim;
       mesh.scale.setScalar(scale);
 
       geometry.computeBoundingSphere();
       const center = geometry.boundingSphere!.center.clone().multiplyScalar(scale);
       mesh.position.sub(center);
+      mesh.position.y += 100;
 
       sceneRef.current!.add(mesh);
       meshRef.current = mesh;
 
       fitCameraToObject(mesh);
       setState({ loading: false, error: null });
-    } catch (e: null | unknown) {
+    } catch (e) {
       console.error(e);
       setState({ loading: false, error: "Falha ao carregar STL. Verifique o arquivo." });
     }
-  };
-
-  const handleDrop = async (e: React.DragEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    const file = e.dataTransfer.files?.[0];
-    if (!file) return;
-    if (!file.name.toLowerCase().endsWith(".stl")) {
-      setState({ loading: false, error: "Apenas arquivos .stl são suportados." });
-      return;
-    }
-    const url = URL.createObjectURL(file);
-    await loadSTL(url);
   };
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -197,93 +233,92 @@ export default function VisualizadorSTL() {
     await loadSTL(url);
   };
 
-  // --- lifecycle -------------------------------------------------------------
-
   useEffect(() => {
     if (!containerRef.current) return;
-
     setupThree();
     animate();
-    window.addEventListener("resize", onResize);
 
-    // opcional: carrega um STL inicial por URL (comente se não quiser)
-    // loadSTL("/models/exemplo.stl").catch(() => {});
+    window.addEventListener("resize", onResize);
+    window.addEventListener("mousemove", onMouseMove);
+    window.addEventListener("click", onClick);
 
     return () => {
       window.removeEventListener("resize", onResize);
+      window.removeEventListener("mousemove", onMouseMove);
+      window.removeEventListener("click", onClick);
       clearCurrentMesh();
       controlsRef.current?.dispose();
       rendererRef.current?.dispose();
-      // remove canvas
-      if (containerRef.current && rendererRef.current) {
-        const el = rendererRef.current.domElement;
-        if (el && el.parentElement === containerRef.current) {
-          containerRef.current.removeChild(el);
-        }
-      }
     };
-     
   }, []);
 
-  // --- UI --------------------------------------------------------------------
-
   return (
-    <div className="min-h-screen w-full flex flex-col bg-gray-100">
+    <div className="flex min-h-screen w-full flex-col bg-gray-100">
       <header className="w-full border-b bg-white">
-        <div className="max-w-6xl mx-auto flex items-center justify-between p-4">
-          <div>
-            <h1 className="text-lg font-semibold">Visualizador STL</h1>
-            <p className="text-sm text-gray-500">
-              Arraste um arquivo .stl para a área ou clique em “Selecionar arquivo”.
-            </p>
-          </div>
-          <div className="flex items-center gap-2">
-            <button
-              className="px-3 py-2 rounded-lg border border-gray-300 bg-white shadow-sm text-sm hover:bg-gray-50"
-              onClick={() => fileInputRef.current?.click()}
-            >
-              Selecionar arquivo
-            </button>
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept=".stl"
-              hidden
-              onChange={handleFileChange}
-            />
-          </div>
+        <div className="mx-auto flex max-w-6xl items-center justify-between p-4">
+          <h1 className="text-lg font-semibold text-gray-800 dark:text-gray-200">
+            Visualizador STL
+          </h1>
+          <button
+            className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-700 dark:text-gray-200 shadow-sm hover:bg-gray-100"
+            onClick={() => fileInputRef.current?.click()}
+          >
+            Selecionar arquivo
+          </button>
+          <input ref={fileInputRef} type="file" accept=".stl" hidden onChange={handleFileChange} />
         </div>
       </header>
 
-      <main className="flex-1">
+      <main className="flex-1 relative">
         <div
           ref={containerRef}
           onDragOver={(e) => e.preventDefault()}
-          onDrop={handleDrop}
-          className="relative max-w-6xl mx-auto my-4 h-[72vh] rounded-xl border-2 border-dashed border-gray-300 bg-white overflow-hidden"
-        >
-          {/* Overlay de instruções */}
-          <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-            {!meshRef.current && !state.loading && (
-              <div className="text-center text-gray-500">
-                <p className="font-medium">Solte um arquivo .stl aqui</p>
-                <p className="text-xs">ou use o botão “Selecionar arquivo”.</p>
-              </div>
-            )}
-          </div>
+          onDrop={(e) => {
+            e.preventDefault();
+            const file = e.dataTransfer.files?.[0];
+            if (!file) return;
+            if (!file.name.toLowerCase().endsWith(".stl")) {
+              setState({ loading: false, error: "Apenas arquivos .stl são suportados." });
+              return;
+            }
+            const url = URL.createObjectURL(file);
+            loadSTL(url);
+          }}
+          className="relative mx-auto my-4 h-[72vh] max-w-6xl overflow-hidden rounded-xl border-2 border-dashed border-gray-300 bg-white"
+        />
 
-          {/* Estado de loading / erro */}
-          {state.loading && (
-            <div className="absolute top-3 left-3 rounded-md bg-white/90 px-3 py-1.5 text-sm shadow">
-              Carregando modelo...
+        {activeAnnotation && (
+          <div
+            className="absolute bg-white dark:bg-gray-800 shadow-lg rounded p-2 border text-gray-800 dark:text-gray-200"
+            style={{ top: activeAnnotation.position.y, left: activeAnnotation.position.x }}
+          >
+            <textarea
+              className="border p-1 text-sm w-40 h-20 text-gray-800 dark:text-gray-100 bg-white dark:bg-gray-700"
+              placeholder="Digite sua anotação..."
+              value={activeAnnotation.text}
+              onChange={(e) =>
+                setActiveAnnotation({ ...activeAnnotation, text: e.target.value })
+              }
+            />
+            <div className="flex gap-2 mt-1">
+              <button
+                className="bg-blue-100 text-blue-800 px-2 py-1 rounded text-xs"
+                onClick={() => {
+                  setAnnotations([...annotations, activeAnnotation]);
+                  setActiveAnnotation(null);
+                }}
+              >
+                Salvar
+              </button>
+              <button
+                className="bg-gray-200 dark:bg-gray-600 text-gray-700 dark:text-gray-200 px-2 py-1 rounded text-xs"
+                onClick={() => setActiveAnnotation(null)}
+              >
+                Cancelar
+              </button>
             </div>
-          )}
-          {state.error && (
-            <div className="absolute top-3 left-3 rounded-md bg-red-50 text-red-700 px-3 py-1.5 text-sm shadow">
-              {state.error}
-            </div>
-          )}
-        </div>
+          </div>
+        )}
       </main>
     </div>
   );
